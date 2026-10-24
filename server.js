@@ -13,6 +13,9 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
 if (!process.env.JWT_SECRET) console.warn('⚠ JWT_SECRET تنظیم نشده؛ قبل از انتشار عمومی حتماً تنظیمش کنید.');
 
+// یوزرنیم مدیر(ها)؛ با کاما جدا کنید. مدیر تیک آبی دارد و پنل مدیریت را می‌بیند.
+const ADMINS = String(process.env.ADMIN_USERNAME || '').toLowerCase().split(',').map((s) => s.trim().replace(/^@/, '')).filter(Boolean);
+const SESSION_DAYS = 180;
 const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '👏', '🎉'];
 const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/; // مثل تلگرام: ۵ تا ۳۲ کاراکتر
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -34,7 +37,7 @@ db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  email          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  email          TEXT UNIQUE COLLATE NOCASE,
   username       TEXT NOT NULL UNIQUE COLLATE NOCASE,
   display_name   TEXT NOT NULL,
   password_hash  TEXT NOT NULL,
@@ -42,9 +45,20 @@ CREATE TABLE IF NOT EXISTS users (
   avatar         BLOB,
   avatar_mime    TEXT,
   avatar_updated INTEGER,
+  verified       INTEGER NOT NULL DEFAULT 0,
+  banned         INTEGER NOT NULL DEFAULT 0,
   last_seen      INTEGER,
   created_at     INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sessions (
+  id          TEXT PRIMARY KEY,
+  user_id     INTEGER NOT NULL REFERENCES users(id),
+  device      TEXT NOT NULL,
+  ip          TEXT,
+  created_at  INTEGER NOT NULL,
+  last_active INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE TABLE IF NOT EXISTS messages (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   sender_id   INTEGER NOT NULL REFERENCES users(id),
@@ -88,12 +102,41 @@ addMissingColumns('users', {
   avatar: 'BLOB',
   avatar_mime: 'TEXT',
   avatar_updated: 'INTEGER',
+  verified: 'INTEGER NOT NULL DEFAULT 0',
+  banned: 'INTEGER NOT NULL DEFAULT 0',
 });
+
+// نسخه‌های قبلی ایمیل را اجباری داشتند؛ جدول کاربران را بدون این اجبار بازسازی می‌کنیم
+const emailCol = db.prepare('PRAGMA table_info(users)').all().find((c) => c.name === 'email');
+if (emailCol && emailCol.notnull) {
+  const cols = 'id, email, username, display_name, password_hash, bio, avatar, avatar_mime, avatar_updated, verified, banned, last_seen, created_at';
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec(`BEGIN;
+    CREATE TABLE users_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE COLLATE NOCASE,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      display_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      bio TEXT NOT NULL DEFAULT '',
+      avatar BLOB, avatar_mime TEXT, avatar_updated INTEGER,
+      verified INTEGER NOT NULL DEFAULT 0,
+      banned INTEGER NOT NULL DEFAULT 0,
+      last_seen INTEGER,
+      created_at INTEGER NOT NULL
+    );
+    INSERT INTO users_new (${cols}) SELECT ${cols} FROM users;
+    DROP TABLE users;
+    ALTER TABLE users_new RENAME TO users;
+    COMMIT;`);
+  db.exec('PRAGMA foreign_keys = ON');
+}
+db.prepare('DELETE FROM sessions WHERE last_active < ?').run(Date.now() - SESSION_DAYS * 864e5);
 addMissingColumns('messages', { file_id: 'TEXT', reply_to: 'INTEGER' });
 db.exec('CREATE INDEX IF NOT EXISTS idx_msg_file ON messages(file_id)');
 
 // ستون عکس پروفایل (BLOB) را در کوئری‌های معمولی نمی‌خوانیم تا سبک بمانند
-const USER_COLS = 'id, email, username, display_name, password_hash, bio, avatar_updated, last_seen, created_at';
+const USER_COLS = 'id, email, username, display_name, password_hash, bio, avatar_updated, verified, banned, last_seen, created_at';
 // پیام به همراه اطلاعات فایل پیوست‌شده
 const MSG_SELECT = `SELECT m.*, f.name AS f_name, f.size AS f_size, f.mime AS f_mime, f.kind AS f_kind,
                            f.width AS f_w, f.height AS f_h
@@ -103,9 +146,17 @@ const q = {
   userById: db.prepare(`SELECT ${USER_COLS} FROM users WHERE id = ?`),
   userByEmail: db.prepare(`SELECT ${USER_COLS} FROM users WHERE email = ?`),
   userByUsername: db.prepare(`SELECT ${USER_COLS} FROM users WHERE username = ?`),
-  insertUser: db.prepare(`INSERT INTO users (email, username, display_name, password_hash, created_at)
-                          VALUES (?, ?, ?, ?, ?)`),
-  updateProfile: db.prepare('UPDATE users SET display_name = ?, username = ?, bio = ?, email = ? WHERE id = ?'),
+  insertUser: db.prepare(`INSERT INTO users (username, display_name, password_hash, created_at)
+                          VALUES (?, ?, ?, ?)`),
+  updateProfile: db.prepare('UPDATE users SET display_name = ?, username = ?, bio = ? WHERE id = ?'),
+  setPassword: db.prepare('UPDATE users SET password_hash = ? WHERE id = ?'),
+  setVerified: db.prepare('UPDATE users SET verified = ? WHERE id = ?'),
+  setBanned: db.prepare('UPDATE users SET banned = ? WHERE id = ?'),
+  insertSession: db.prepare('INSERT INTO sessions (id, user_id, device, ip, created_at, last_active) VALUES (?, ?, ?, ?, ?, ?)'),
+  sessionById: db.prepare('SELECT * FROM sessions WHERE id = ?'),
+  sessionsOf: db.prepare('SELECT * FROM sessions WHERE user_id = ? ORDER BY last_active DESC'),
+  touchSession: db.prepare('UPDATE sessions SET last_active = ? WHERE id = ?'),
+  deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
   setAvatar: db.prepare('UPDATE users SET avatar = ?, avatar_mime = ?, avatar_updated = ? WHERE id = ?'),
   avatarById: db.prepare('SELECT avatar, avatar_mime FROM users WHERE id = ?'),
   searchUsers: db.prepare(`SELECT ${USER_COLS} FROM users WHERE username LIKE ? ESCAPE '\\' AND id != ?
@@ -140,16 +191,19 @@ const q = {
 // ───────────── کمکی‌ها ─────────────
 const onlineCounts = new Map(); // userId -> تعداد تب‌های باز
 
+const isAdmin = (u) => !!u && ADMINS.includes(String(u.username).toLowerCase());
+
 const userInfo = (u) => ({
   id: u.id,
   username: u.username,
   displayName: u.display_name,
+  verified: !!u.verified || isAdmin(u),
   bio: u.bio || '',
   avatar: u.avatar_updated ? `/api/avatar/${u.id}?v=${u.avatar_updated}` : null,
   online: onlineCounts.has(u.id),
   lastSeen: u.last_seen || null,
 });
-const meInfo = (u) => ({ ...userInfo(u), email: u.email });
+const meInfo = (u) => ({ ...userInfo(u), isAdmin: isAdmin(u) });
 
 const replyPreview = (r) => ({
   id: r.id,
@@ -191,12 +245,53 @@ function reactionsFor(ids) {
   return map;
 }
 
-const signToken = (user) => jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '30d' });
+// ───────────── نشست‌ها (دستگاه‌های فعال) ─────────────
+function deviceName(ua = '') {
+  const os = /Android/.test(ua) ? 'Android'
+    : /iPhone|iPad|iPod/.test(ua) ? 'iPhone/iPad'
+    : /Windows/.test(ua) ? 'Windows'
+    : /Mac OS X|Macintosh/.test(ua) ? 'Mac'
+    : /Linux/.test(ua) ? 'Linux' : 'سیستم نامشخص';
+  const browser = /Edg\//.test(ua) ? 'Edge'
+    : /OPR\/|Opera/.test(ua) ? 'Opera'
+    : /SamsungBrowser/.test(ua) ? 'Samsung Internet'
+    : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\//.test(ua) ? 'Chrome'
+    : /Safari\//.test(ua) ? 'Safari' : 'مرورگر';
+  return `${browser} روی ${os}`;
+}
+
+// برای هر ورود یک نشست جدا می‌سازیم تا بشود از هر دستگاه جداگانه خارج شد
+function createSession(user, req) {
+  const sid = crypto.randomBytes(16).toString('hex');
+  const now = Date.now();
+  q.insertSession.run(sid, user.id, deviceName(req.headers['user-agent']), req.ip || null, now, now);
+  io.to('u:' + user.id).emit('sessions:changed');
+  return jwt.sign({ id: user.id, sid }, JWT_SECRET, { expiresIn: `${SESSION_DAYS}d` });
+}
+
+function revokeSession(sid, userId) {
+  q.deleteSession.run(sid);
+  io.to('s:' + sid).emit('session:revoked');
+  setTimeout(() => io.in('s:' + sid).disconnectSockets(true), 300);
+  io.to('u:' + userId).emit('sessions:changed');
+}
+
+function revokeAllSessions(userId, exceptSid = null) {
+  for (const s of q.sessionsOf.all(userId)) if (s.id !== exceptSid) revokeSession(s.id, userId);
+}
 
 function userFromToken(token) {
   try {
-    const { id } = jwt.verify(token, JWT_SECRET);
-    return q.userById.get(id) || null;
+    const { id, sid } = jwt.verify(token, JWT_SECRET);
+    if (!sid) return null; // توکن‌های نسخه‌ی قبلی معتبر نیستند
+    const session = q.sessionById.get(sid);
+    if (!session || session.user_id !== id) return null;
+    const user = q.userById.get(id);
+    if (!user || user.banned) return null;
+    const now = Date.now();
+    if (now - session.last_active > 60e3) q.touchSession.run(now, sid);
+    return { ...user, sid };
   } catch {
     return null;
   }
@@ -210,8 +305,20 @@ function auth(req, res, next) {
   next();
 }
 
+function adminOnly(req, res, next) {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'دسترسی ندارید' });
+  next();
+}
+
+// رمز قوی: حداقل ۹ کاراکتر، شامل حرف و عدد
+function passwordError(p) {
+  if (p.length < 9) return 'رمز عبور باید حداقل ۹ کاراکتر باشد';
+  if (!/[A-Za-z\u0600-\u06FF]/.test(p) || !/[0-9\u06F0-\u06F9]/.test(p)) return 'رمز عبور باید هم حرف داشته باشد و هم عدد';
+  return null;
+}
+
 // اعتبارسنجی مشترک ثبت‌نام و ویرایش پروفایل
-function validateProfile({ displayName, username, email, bio }) {
+function validateProfile({ displayName, username, bio }) {
   if (!displayName || [...displayName].length > 64)
     return { error: 'نام پروفایل باید بین ۱ تا ۶۴ کاراکتر باشد', field: 'name' };
   if (!USERNAME_RE.test(username))
@@ -219,7 +326,6 @@ function validateProfile({ displayName, username, email, bio }) {
       error: 'یوزرنیم باید ۵ تا ۳۲ کاراکتر باشد، با حرف انگلیسی شروع شود و فقط حروف انگلیسی، عدد و _ داشته باشد',
       field: 'username',
     };
-  if (!EMAIL_RE.test(email)) return { error: 'ایمیل معتبر نیست', field: 'email' };
   if (bio !== undefined && [...bio].length > BIO_MAX)
     return { error: `بیوگرافی حداکثر ${BIO_MAX.toLocaleString('fa-IR')} کاراکتر است`, field: 'bio' };
   return null;
@@ -230,6 +336,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+app.set('trust proxy', 'loopback'); // پشت Caddy آی‌پی واقعی کاربر را بخوان
 app.use(express.static(path.join(__dirname, 'public')));
 
 // آپلود عکس یا فایل (قبل از express.json تعریف می‌شود تا بدنه‌ی خام دریافت شود)
@@ -295,35 +402,60 @@ app.get('/api/username-available', (req, res) => {
 
 app.post('/api/register', (req, res) => {
   const b = req.body || {};
-  const data = {
-    email: String(b.email || '').trim().toLowerCase(),
-    username: String(b.username || '').trim().replace(/^@/, ''),
-    displayName: String(b.displayName || '').trim(),
-  };
+  const username = String(b.username || '').trim().replace(/^@/, '');
   const password = String(b.password || '');
+  const data = { username, displayName: String(b.displayName || '').trim() || username };
 
   const invalid = validateProfile(data);
   if (invalid) return res.status(400).json(invalid);
-  if (password.length < 6) return res.status(400).json({ error: 'رمز عبور باید حداقل ۶ کاراکتر باشد', field: 'password' });
-  if (q.userByEmail.get(data.email)) return res.status(409).json({ error: 'با این ایمیل قبلاً حساب ساخته شده', field: 'email' });
-  if (q.userByUsername.get(data.username)) return res.status(409).json({ error: 'این یوزرنیم قبلاً گرفته شده', field: 'username' });
+  const weak = passwordError(password);
+  if (weak) return res.status(400).json({ error: weak, field: 'password' });
+  if (q.userByUsername.get(username)) return res.status(409).json({ error: 'این یوزرنیم قبلاً گرفته شده', field: 'username' });
 
   try {
-    const info = q.insertUser.run(data.email, data.username, data.displayName, bcrypt.hashSync(password, 10), Date.now());
+    const info = q.insertUser.run(username, data.displayName, bcrypt.hashSync(password, 10), Date.now());
     const user = q.userById.get(Number(info.lastInsertRowid));
-    res.json({ token: signToken(user), user: meInfo(user) });
+    res.json({ token: createSession(user, req), user: meInfo(user) });
   } catch {
-    res.status(409).json({ error: 'یوزرنیم یا ایمیل تکراری است' });
+    res.status(409).json({ error: 'این یوزرنیم قبلاً گرفته شده', field: 'username' });
   }
 });
 
 app.post('/api/login', (req, res) => {
   const login = String(req.body?.login || '').trim().replace(/^@/, '');
   const password = String(req.body?.password || '');
-  const user = login.includes('@') ? q.userByEmail.get(login.toLowerCase()) : q.userByUsername.get(login);
+  // ورود با ایمیل فقط برای حساب‌های قدیمی که ایمیل دارند باقی مانده
+  const user = EMAIL_RE.test(login) ? q.userByEmail.get(login.toLowerCase()) : q.userByUsername.get(login);
   if (!user || !bcrypt.compareSync(password, user.password_hash))
-    return res.status(400).json({ error: 'ایمیل/یوزرنیم یا رمز عبور اشتباه است' });
-  res.json({ token: signToken(user), user: meInfo(user) });
+    return res.status(400).json({ error: 'یوزرنیم یا رمز عبور اشتباه است' });
+  if (user.banned) return res.status(403).json({ error: 'این حساب توسط مدیر مسدود شده است' });
+  res.json({ token: createSession(user, req), user: meInfo(user) });
+});
+
+app.post('/api/logout', auth, (req, res) => {
+  revokeSession(req.user.sid, req.user.id);
+  res.json({ ok: true });
+});
+
+// ───────────── دستگاه‌های فعال ─────────────
+const sessionInfo = (s, currentSid) => ({
+  id: s.id, device: s.device, ip: s.ip, createdAt: s.created_at, lastActive: s.last_active, current: s.id === currentSid,
+});
+
+app.get('/api/sessions', auth, (req, res) => {
+  res.json(q.sessionsOf.all(req.user.id).map((s) => sessionInfo(s, req.user.sid)));
+});
+
+app.delete('/api/sessions/:id', auth, (req, res) => {
+  const s = q.sessionById.get(String(req.params.id));
+  if (!s || s.user_id !== req.user.id) return res.status(404).json({ error: 'این دستگاه پیدا نشد' });
+  revokeSession(s.id, req.user.id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/sessions', auth, (req, res) => {
+  revokeAllSessions(req.user.id, req.user.sid);
+  res.json({ ok: true });
 });
 
 app.get('/api/me', auth, (req, res) => res.json(meInfo(req.user)));
@@ -335,7 +467,6 @@ app.put('/api/me', auth, (req, res) => {
   const data = {
     displayName: b.displayName !== undefined ? String(b.displayName).trim() : me.display_name,
     username: b.username !== undefined ? String(b.username).trim().replace(/^@/, '') : me.username,
-    email: b.email !== undefined ? String(b.email).trim().toLowerCase() : me.email,
     bio: b.bio !== undefined ? String(b.bio).replace(/\s+/g, ' ').trim() : me.bio || '',
   };
   const invalid = validateProfile(data);
@@ -344,18 +475,28 @@ app.put('/api/me', auth, (req, res) => {
   const sameUsername = q.userByUsername.get(data.username);
   if (sameUsername && sameUsername.id !== me.id)
     return res.status(409).json({ error: 'این یوزرنیم قبلاً گرفته شده', field: 'username' });
-  const sameEmail = q.userByEmail.get(data.email);
-  if (sameEmail && sameEmail.id !== me.id)
-    return res.status(409).json({ error: 'این ایمیل برای حساب دیگری ثبت شده', field: 'email' });
 
   try {
-    q.updateProfile.run(data.displayName, data.username, data.bio, data.email, me.id);
+    q.updateProfile.run(data.displayName, data.username, data.bio, me.id);
   } catch {
-    return res.status(409).json({ error: 'یوزرنیم یا ایمیل تکراری است' });
+    return res.status(409).json({ error: 'این یوزرنیم قبلاً گرفته شده', field: 'username' });
   }
   const updated = q.userById.get(me.id);
   io.emit('user:update', userInfo(updated));
   res.json(meInfo(updated));
+});
+
+// تغییر رمز عبور (بقیه‌ی دستگاه‌ها خارج می‌شوند)
+app.put('/api/me/password', auth, (req, res) => {
+  const current = String(req.body?.current || '');
+  const next = String(req.body?.password || '');
+  if (!bcrypt.compareSync(current, req.user.password_hash))
+    return res.status(400).json({ error: 'رمز فعلی اشتباه است', field: 'current' });
+  const weak = passwordError(next);
+  if (weak) return res.status(400).json({ error: weak, field: 'password' });
+  q.setPassword.run(bcrypt.hashSync(next, 10), req.user.id);
+  revokeAllSessions(req.user.id, req.user.sid);
+  res.json({ ok: true });
 });
 
 // آپلود عکس پروفایل (تصویر به‌صورت data URL که در مرورگر کوچک و مربعی شده)
@@ -424,6 +565,108 @@ app.get('/api/messages/:peerId', auth, (req, res) => {
   res.json({ messages: page.map((m) => formatMessage(m, rx[m.id] || [], replies)), hasMore });
 });
 
+// ───────────── پنل مدیریت ─────────────
+// مدیر آمار، کاربران، دستگاه‌ها و ورودها را می‌بیند؛ متن پیام‌های خصوصی نمایش داده نمی‌شود.
+const adminQ = {
+  count: (sql, ...a) => db.prepare(sql).get(...a).c,
+  users: db.prepare(`SELECT ${USER_COLS},
+      (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS msg_count,
+      (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id) AS dev_count
+    FROM users u WHERE username LIKE @q ESCAPE '\\' OR display_name LIKE @q ESCAPE '\\'
+    ORDER BY created_at DESC LIMIT 300`),
+  recentLogins: db.prepare(`SELECT s.created_at, s.device, s.ip, s.user_id FROM sessions s
+    ORDER BY s.created_at DESC LIMIT 25`),
+  recentSignups: db.prepare('SELECT id, created_at FROM users ORDER BY created_at DESC LIMIT 25'),
+};
+
+app.get('/api/admin/stats', auth, adminOnly, (req, res) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const t = today.getTime();
+  const files = db.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(size), 0) AS s FROM uploads WHERE message_id IS NOT NULL').get();
+  const events = [
+    ...adminQ.recentLogins.all().map((r) => ({ type: 'login', at: r.created_at, device: r.device, ip: r.ip, user: r.user_id })),
+    ...adminQ.recentSignups.all().map((r) => ({ type: 'signup', at: r.created_at, user: r.id })),
+  ].sort((a, b) => b.at - a.at).slice(0, 30);
+  const users = {};
+  for (const e of events) {
+    if (users[e.user]) continue;
+    const u = q.userById.get(e.user);
+    if (u) users[e.user] = userInfo(u);
+  }
+  res.json({
+    totalUsers: adminQ.count('SELECT COUNT(*) AS c FROM users'),
+    onlineNow: onlineCounts.size,
+    newToday: adminQ.count('SELECT COUNT(*) AS c FROM users WHERE created_at >= ?', t),
+    activeToday: adminQ.count('SELECT COUNT(DISTINCT user_id) AS c FROM sessions WHERE last_active >= ?', t),
+    messagesToday: adminQ.count('SELECT COUNT(*) AS c FROM messages WHERE created_at >= ?', t),
+    totalMessages: adminQ.count('SELECT COUNT(*) AS c FROM messages'),
+    files: files.c,
+    filesSize: files.s,
+    sessions: adminQ.count('SELECT COUNT(*) AS c FROM sessions'),
+    events,
+    users,
+  });
+});
+
+app.get('/api/admin/users', auth, adminOnly, (req, res) => {
+  const term = String(req.query.q || '').trim().replace(/^@/, '');
+  const like = '%' + term.replace(/[\\%_]/g, (c) => '\\' + c) + '%';
+  res.json(adminQ.users.all({ q: like }).map((u) => ({
+    ...userInfo(u),
+    isAdmin: isAdmin(u),
+    banned: !!u.banned,
+    createdAt: u.created_at,
+    messages: u.msg_count,
+    devices: u.dev_count,
+  })));
+});
+
+app.get('/api/admin/users/:id/sessions', auth, adminOnly, (req, res) => {
+  res.json(q.sessionsOf.all(Number(req.params.id)).map((s) => sessionInfo(s, req.user.sid)));
+});
+
+function adminTarget(req, res) {
+  const u = q.userById.get(Number(req.params.id));
+  if (!u) res.status(404).json({ error: 'کاربر پیدا نشد' });
+  return u || null;
+}
+
+app.post('/api/admin/users/:id/verify', auth, adminOnly, (req, res) => {
+  const u = adminTarget(req, res);
+  if (!u) return;
+  q.setVerified.run(req.body?.verified ? 1 : 0, u.id);
+  io.emit('user:update', userInfo(q.userById.get(u.id)));
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/ban', auth, adminOnly, (req, res) => {
+  const u = adminTarget(req, res);
+  if (!u) return;
+  if (isAdmin(u)) return res.status(400).json({ error: 'حساب مدیر را نمی‌شود مسدود کرد' });
+  q.setBanned.run(req.body?.banned ? 1 : 0, u.id);
+  if (req.body?.banned) revokeAllSessions(u.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/logout', auth, adminOnly, (req, res) => {
+  const u = adminTarget(req, res);
+  if (!u) return;
+  revokeAllSessions(u.id, u.id === req.user.id ? req.user.sid : null);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/password', auth, adminOnly, (req, res) => {
+  const u = adminTarget(req, res);
+  if (!u) return;
+  const p = String(req.body?.password || '');
+  const weak = passwordError(p);
+  if (weak) return res.status(400).json({ error: weak });
+  q.setPassword.run(bcrypt.hashSync(p, 10), u.id);
+  revokeAllSessions(u.id, u.id === req.user.id ? req.user.sid : null);
+  res.json({ ok: true });
+});
+
 // خطای حجم زیاد و بدنه‌ی نامعتبر را به‌صورت JSON برگردان
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large')
@@ -437,6 +680,7 @@ io.use((socket, next) => {
   const user = userFromToken(socket.handshake.auth?.token);
   if (!user) return next(new Error('unauthorized'));
   socket.userId = user.id;
+  socket.sid = user.sid;
   next();
 });
 
@@ -446,6 +690,7 @@ const inConversation = (m, a, b) =>
 io.on('connection', (socket) => {
   const myId = socket.userId;
   socket.join('u:' + myId);
+  socket.join('s:' + socket.sid);
 
   const count = (onlineCounts.get(myId) || 0) + 1;
   onlineCounts.set(myId, count);
@@ -522,4 +767,7 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => console.log(`${APP_NAME} روی http://localhost:${PORT} اجرا شد`));
+server.listen(PORT, () => {
+  console.log(`${APP_NAME} روی http://localhost:${PORT} اجرا شد`);
+  console.log(ADMINS.length ? `مدیر: @${ADMINS.join(', @')}` : 'ⓘ برای فعال شدن پنل مدیریت، ADMIN_USERNAME را تنظیم کنید.');
+});

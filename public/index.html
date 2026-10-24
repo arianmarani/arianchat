@@ -18,34 +18,32 @@
   <form id="authForm" class="auth-card" novalidate>
     <img class="logo" src="/logo.svg" alt="Arian Chat">
     <h1 class="brand" dir="ltr">Arian Chat</h1>
-    <p class="sub" id="authSub">ایمیل یا یوزرنیم و رمز عبورتان را وارد کنید.</p>
+    <p class="sub" id="authSub">یوزرنیم و رمز عبورتان را وارد کنید.</p>
 
-    <div class="signup-only">
-      <div class="field">
-        <input id="f-name" placeholder=" " maxlength="64" autocomplete="name">
-        <label for="f-name">نام پروفایل</label>
-      </div>
-      <div class="field">
-        <input id="f-username" class="ltr" placeholder=" " maxlength="33" autocomplete="username" autocapitalize="off" spellcheck="false">
-        <label for="f-username">یوزرنیم</label>
-        <div class="hint" id="unameHint">دیگران با این یوزرنیم شما را پیدا می‌کنند.</div>
-      </div>
-      <div class="field">
-        <input id="f-email" class="ltr" type="email" placeholder=" " autocomplete="email" autocapitalize="off">
-        <label for="f-email">ایمیل</label>
-      </div>
-    </div>
-
-    <div class="login-only">
-      <div class="field">
-        <input id="f-login" class="ltr" placeholder=" " autocomplete="username" autocapitalize="off" spellcheck="false">
-        <label for="f-login">ایمیل یا یوزرنیم</label>
-      </div>
+    <div class="field">
+      <input id="f-username" class="ltr" placeholder=" " maxlength="33" autocomplete="username" autocapitalize="off" spellcheck="false">
+      <label for="f-username">یوزرنیم</label>
+      <div class="hint signup-only" id="unameHint">دیگران با این یوزرنیم شما را پیدا می‌کنند.</div>
     </div>
 
     <div class="field">
       <input id="f-password" class="ltr" type="password" placeholder=" " autocomplete="current-password">
       <label for="f-password">رمز عبور</label>
+      <button type="button" class="pw-toggle" data-for="f-password" aria-label="نمایش رمز">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      </button>
+    </div>
+
+    <div class="signup-only">
+      <ul class="pw-rules" id="pwRules">
+        <li data-rule="len">حداقل ۹ کاراکتر</li>
+        <li data-rule="letter">حداقل یک حرف</li>
+        <li data-rule="digit">حداقل یک عدد</li>
+      </ul>
+      <div class="field">
+        <input id="f-password2" class="ltr" type="password" placeholder=" " autocomplete="new-password">
+        <label for="f-password2">تکرار رمز عبور</label>
+      </div>
     </div>
 
     <div class="form-error" id="authError" role="alert"></div>
@@ -75,6 +73,15 @@
         <button class="menu-item" id="settingsBtn">
           <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           تنظیمات ظاهر و فونت
+        </button>
+        <button class="menu-item" id="devicesBtn">
+          <svg viewBox="0 0 24 24" width="20" height="20"><rect x="3" y="4" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 18h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="16" y="9" width="5" height="11" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+          دستگاه‌ها و امنیت
+          <span class="menu-count" id="devicesCount"></span>
+        </button>
+        <button class="menu-item admin-only hidden" id="adminBtn">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 3 4 6v6c0 4.4 3.4 8.3 8 9 4.6-.7 8-4.6 8-9V6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m8.8 12 2.2 2.2 4.2-4.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          پنل مدیریت
         </button>
         <button class="menu-item danger" id="logoutBtn">
           <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 8l-4 4 4 4M6 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -119,11 +126,6 @@
           <label for="p-username">یوزرنیم</label>
           <div class="hint" id="pUnameHint"></div>
         </div>
-        <div class="field">
-          <input id="p-email" class="ltr" type="email" placeholder=" " autocapitalize="off">
-          <label for="p-email">ایمیل</label>
-        </div>
-
         <div class="form-error" id="profileError" role="alert"></div>
         <button class="btn-primary" id="saveProfile" type="submit">ذخیره تغییرات</button>
       </form>
@@ -160,6 +162,41 @@
           <button type="button" data-scheme="light">روشن</button>
           <button type="button" data-scheme="dark">تیره</button>
         </div>
+      </div>
+    </section>
+
+    <!-- دستگاه‌ها و امنیت -->
+    <section id="devicesPanel" class="panel hidden" aria-label="دستگاه‌ها و امنیت">
+      <div class="panel-header">
+        <button class="icon-btn" id="devicesBack" aria-label="بازگشت">
+          <svg viewBox="0 0 24 24" width="24" height="24"><path d="M5 12h14M13 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <h2>دستگاه‌ها و امنیت</h2>
+      </div>
+      <div class="panel-body">
+        <h3 class="set-title">این دستگاه</h3>
+        <div id="currentDevice" class="device-list"></div>
+
+        <div class="devices-others-head">
+          <h3 class="set-title">دستگاه‌های دیگر</h3>
+        </div>
+        <div id="otherDevices" class="device-list"></div>
+        <button type="button" class="danger-btn hidden" id="logoutOthers">خروج از همه‌ی دستگاه‌های دیگر</button>
+
+        <h3 class="set-title" style="margin-top:28px">تغییر رمز عبور</h3>
+        <form id="pwForm" novalidate>
+          <div class="field">
+            <input id="pw-current" class="ltr" type="password" placeholder=" " autocomplete="current-password">
+            <label for="pw-current">رمز فعلی</label>
+          </div>
+          <div class="field">
+            <input id="pw-new" class="ltr" type="password" placeholder=" " autocomplete="new-password">
+            <label for="pw-new">رمز جدید (حداقل ۹ کاراکتر، حرف و عدد)</label>
+          </div>
+          <div class="form-error" id="pwError"></div>
+          <button class="btn-primary" type="submit" id="pwSave">تغییر رمز</button>
+          <p class="field-note" style="margin-top:10px">بعد از تغییر رمز، همه‌ی دستگاه‌های دیگر خارج می‌شوند.</p>
+        </form>
       </div>
     </section>
   </aside>
@@ -230,6 +267,33 @@
       <svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     </button>
     <div id="userModalBody"></div>
+  </div>
+</div>
+
+<!-- پنل مدیریت -->
+<div id="adminPanel" class="admin hidden" role="dialog" aria-modal="true" aria-label="پنل مدیریت">
+  <div class="admin-inner">
+    <header class="admin-head">
+      <h2>پنل مدیریت</h2>
+      <div class="admin-tabs" id="adminTabs">
+        <button type="button" data-tab="users" class="selected">کاربران</button>
+        <button type="button" data-tab="events">ورودها و عضویت‌ها</button>
+      </div>
+      <button class="icon-btn" id="adminClose" aria-label="بستن">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <div class="admin-stats" id="adminStats"></div>
+    <div class="admin-tab" data-tab="users">
+      <div class="search-box admin-search">
+        <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="adminSearch" placeholder="جستجوی نام یا یوزرنیم" autocomplete="off">
+      </div>
+      <div id="adminUsers" class="admin-users"></div>
+    </div>
+    <div class="admin-tab hidden" data-tab="events">
+      <div id="adminEvents" class="admin-events"></div>
+    </div>
   </div>
 </div>
 

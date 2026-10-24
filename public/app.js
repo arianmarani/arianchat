@@ -122,6 +122,10 @@ function lastSeenText(u) {
 const initials = (name) =>
   (name || '').trim().split(/\s+/).slice(0, 2).map((w) => [...w][0] || '').join('').toUpperCase() || '?';
 
+const VERIFIED_SVG = '<svg class="vtick" viewBox="0 0 24 24" aria-label="تأییدشده"><path fill="#3b9cf5" d="M12 1.6l2.5 1.8 3.1-.1 1 2.9 2.5 1.8-.9 3 .9 3-2.5 1.8-1 2.9-3.1-.1L12 22.4l-2.5-1.8-3.1.1-1-2.9-2.5-1.8.9-3-.9-3 2.5-1.8 1-2.9 3.1.1z"/><path d="m7.9 12.3 2.8 2.8 5.5-5.7" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// نام کاربر به همراه تیک آبی (اگر تأییدشده باشد)
+const nameHtml = (u) => `<span class="uname">${esc(u?.displayName || '')}</span>${u?.verified ? VERIFIED_SVG : ''}`;
+
 function avatar(u, size = '', showOnline = true) {
   const dot = showOnline && u.online && u.id !== state.me?.id ? '<span class="dot"></span>' : '';
   if (u.avatar) return `<div class="avatar ${size}"><img src="${esc(u.avatar)}" alt="" loading="lazy">${dot}</div>`;
@@ -189,15 +193,16 @@ function setAuthMode(mode) {
   const signup = mode === 'signup';
   $('#auth').classList.toggle('signup', signup);
   $('#authSub').textContent = signup
-    ? 'نام، یوزرنیم یکتا و ایمیلتان را وارد کنید.'
-    : 'ایمیل یا یوزرنیم و رمز عبورتان را وارد کنید.';
-  $('#authSubmit').textContent = signup ? 'ثبت‌نام' : 'ورود';
+    ? 'یک یوزرنیم یکتا و یک رمز قوی انتخاب کنید.'
+    : 'یوزرنیم و رمز عبورتان را وارد کنید.';
+  $('#authSubmit').textContent = signup ? 'ساخت حساب' : 'ورود';
   $('#switchText').textContent = signup ? 'حساب کاربری دارید؟' : 'حساب کاربری ندارید؟';
   $('#switchMode').textContent = signup ? 'وارد شوید' : 'ثبت‌نام کنید';
   $('#f-password').autocomplete = signup ? 'new-password' : 'current-password';
   $('#authError').textContent = '';
   document.querySelectorAll('.field.error').forEach((f) => f.classList.remove('error'));
-  (signup ? $('#f-name') : $('#f-login')).focus();
+  updatePwRules();
+  $('#f-username').focus();
 }
 
 function showAuth() {
@@ -209,6 +214,31 @@ function showAuth() {
 $('#switchMode').addEventListener('click', (e) => {
   e.preventDefault();
   setAuthMode(authMode === 'login' ? 'signup' : 'login');
+});
+
+// قوانین رمز قوی (همان قوانین سرور)
+const PW_RULES = {
+  len: (p) => p.length >= 9,
+  letter: (p) => /[A-Za-z\u0600-\u06FF]/.test(p),
+  digit: (p) => /[0-9\u06F0-\u06F9]/.test(p),
+};
+const pwProblem = (p) =>
+  !PW_RULES.len(p) ? 'رمز عبور باید حداقل ۹ کاراکتر باشد'
+    : !PW_RULES.letter(p) || !PW_RULES.digit(p) ? 'رمز عبور باید هم حرف داشته باشد و هم عدد' : null;
+
+function updatePwRules() {
+  const p = $('#f-password').value;
+  document.querySelectorAll('#pwRules li').forEach((li) => li.classList.toggle('ok', PW_RULES[li.dataset.rule](p)));
+}
+$('#f-password').addEventListener('input', updatePwRules);
+
+// دکمه‌ی چشم برای نمایش/پنهان کردن رمز
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('.pw-toggle');
+  if (!t) return;
+  const input = document.getElementById(t.dataset.for);
+  input.type = input.type === 'password' ? 'text' : 'password';
+  t.classList.toggle('on', input.type === 'text');
 });
 
 // بررسی زنده‌ی یوزرنیم؛ ownUsername برای فرم ویرایش پروفایل است
@@ -253,37 +283,44 @@ $('#authForm').addEventListener('submit', async (e) => {
   const btn = $('#authSubmit');
   err.textContent = '';
   document.querySelectorAll('.field.error').forEach((f) => f.classList.remove('error'));
+  const fail = (msg, sel) => {
+    err.textContent = msg;
+    if (sel) {
+      $(sel).closest('.field').classList.add('error');
+      $(sel).focus();
+    }
+  };
 
-  const body = authMode === 'login'
-    ? { login: $('#f-login').value, password: $('#f-password').value }
-    : {
-        displayName: $('#f-name').value,
-        username: $('#f-username').value,
-        email: $('#f-email').value,
-        password: $('#f-password').value,
-      };
+  const username = $('#f-username').value.trim();
+  const password = $('#f-password').value;
+  if (!username) return fail('یوزرنیم را وارد کنید', '#f-username');
+  if (authMode === 'signup') {
+    const problem = pwProblem(password);
+    if (problem) return fail(problem, '#f-password');
+    if (password !== $('#f-password2').value) return fail('تکرار رمز عبور یکسان نیست', '#f-password2');
+  }
 
   btn.disabled = true;
   try {
-    const r = await api(authMode === 'login' ? '/api/login' : '/api/register', { method: 'POST', body });
+    const r = authMode === 'login'
+      ? await api('/api/login', { method: 'POST', body: { login: username, password } })
+      : await api('/api/register', { method: 'POST', body: { username, password } });
     state.token = r.token;
     state.me = r.user;
     localStorage.setItem('token', r.token);
     $('#f-password').value = '';
+    $('#f-password2').value = '';
     startApp();
   } catch (ex) {
-    err.textContent = ex.message;
-    const map = { name: '#f-name', username: '#f-username', email: '#f-email', password: '#f-password' };
-    if (ex.field && map[ex.field]) {
-      $(map[ex.field]).closest('.field').classList.add('error');
-      $(map[ex.field]).focus();
-    }
+    const map = { username: '#f-username', password: '#f-password' };
+    fail(ex.message, map[ex.field]);
   } finally {
     btn.disabled = false;
   }
 });
 
-function logout() {
+async function logout() {
+  try { await api('/api/logout', { method: 'POST' }); } catch { /* نادیده */ }
   localStorage.removeItem('token');
   state.socket?.disconnect();
   location.reload();
@@ -306,15 +343,16 @@ async function startApp() {
   state.users.set(state.me.id, state.me);
   renderMe();
   connectSocket();
+  loadDevices();
   await loadChats();
 }
 
 function renderMe() {
   const me = state.me;
   $('#menuProfile').innerHTML = `${avatar(me, 'sm', false)}
-    <div><div class="name">${esc(me.displayName)}</div>
-    <div class="sub">@${esc(me.username)}</div>
-    <div class="sub">${esc(me.email || '')}</div></div>`;
+    <div><div class="name">${nameHtml(me)}</div>
+    <div class="sub">@${esc(me.username)}</div></div>`;
+  $('#adminBtn').classList.toggle('hidden', !me.isAdmin);
 }
 
 async function loadChats() {
@@ -343,6 +381,16 @@ function connectSocket() {
       }
     }
     connectedBefore = true;
+  });
+
+  s.on('session:revoked', () => {
+    localStorage.removeItem('token');
+    toast('از این دستگاه خارج شدید');
+    setTimeout(() => location.reload(), 1300);
+  });
+
+  s.on('sessions:changed', () => {
+    loadDevices();
   });
 
   s.on('connect_error', (err) => {
@@ -452,13 +500,13 @@ function renderChatList() {
     const u = state.users.get(id);
     const mine = c.last.from === state.me.id;
     const preview = state.typing.has(id)
-      ? '<span class="typing-text">در حال نوشتن…</span>'
+      ? '<span class="typing-text">در حال نوشتن<span class="dots"><i></i><i></i><i></i></span></span>'
       : (mine ? '<span class="you">شما: </span>' : '') + esc(previewText(c.last));
     return `<div class="chat-item${id === state.activeId ? ' active' : ''}" data-id="${id}">
       ${avatar(u)}
       <div class="ci-body">
         <div class="ci-top">
-          <span class="ci-name">${esc(u.displayName)}</span>
+          <span class="ci-name">${nameHtml(u)}</span>
           <span class="ci-time">${mine ? tick(c.last) : ''}${fmtListTime(c.last.createdAt)}</span>
         </div>
         <div class="ci-bottom">
@@ -515,7 +563,7 @@ $('#searchInput').addEventListener('input', (e) => {
         ? res.map((u) => `<div class="chat-item" data-id="${u.id}">
             ${avatar(u)}
             <div class="ci-body">
-              <div class="ci-top"><span class="ci-name">${esc(u.displayName)}</span></div>
+              <div class="ci-top"><span class="ci-name">${nameHtml(u)}</span></div>
               <div class="ci-bottom"><span class="ci-preview username">@${highlight(u.username, term)}</span></div>
             </div></div>`).join('')
         : `<div class="list-empty">کاربری با یوزرنیم «${esc(term)}» پیدا نشد.</div>`);
@@ -540,6 +588,8 @@ $('#logoutBtn').addEventListener('click', logout);
 $('#menuProfile').addEventListener('click', openProfileEditor);
 $('#editProfileBtn').addEventListener('click', openProfileEditor);
 $('#settingsBtn').addEventListener('click', openSettings);
+$('#devicesBtn').addEventListener('click', openDevices);
+$('#adminBtn').addEventListener('click', openAdmin);
 
 // ───────────── ویرایش پروفایل خودم ─────────────
 const BIO_MAX = 70;
@@ -564,7 +614,6 @@ function openProfileEditor() {
   $('#p-name').value = me.displayName;
   $('#p-bio').value = me.bio || '';
   $('#p-username').value = me.username;
-  $('#p-email').value = me.email || '';
   $('#profileError').textContent = '';
   document.querySelectorAll('#profileForm .field.error').forEach((f) => f.classList.remove('error'));
   resetPUnameHint();
@@ -593,7 +642,6 @@ $('#profileForm').addEventListener('submit', async (e) => {
         displayName: $('#p-name').value,
         bio: $('#p-bio').value,
         username: $('#p-username').value,
-        email: $('#p-email').value,
       },
     });
     state.me = me;
@@ -603,7 +651,7 @@ $('#profileForm').addEventListener('submit', async (e) => {
     toast('پروفایل ذخیره شد');
   } catch (ex) {
     err.textContent = ex.message;
-    const map = { name: '#p-name', username: '#p-username', email: '#p-email', bio: '#p-bio' };
+    const map = { name: '#p-name', username: '#p-username', bio: '#p-bio' };
     if (ex.field && map[ex.field]) {
       $(map[ex.field]).closest('.field').classList.add('error');
       $(map[ex.field]).focus();
@@ -679,7 +727,7 @@ function renderUserModal(id) {
   $('#userModalBody').innerHTML = `
     <div class="profile-hero">
       ${avatar(u, 'xl', false)}
-      <div class="p-name">${esc(u.displayName)}</div>
+      <div class="p-name">${nameHtml(u)}</div>
       <div class="p-status">${esc(status)}</div>
     </div>
     <div class="info-rows">
@@ -836,10 +884,11 @@ function renderHeader() {
   const u = state.users.get(state.activeId);
   if (!u) return;
   $('#chatHeaderAvatar').innerHTML = avatar(u, 'sm', false);
-  $('#chatHeaderName').textContent = u.displayName;
+  $('#chatHeaderName').innerHTML = nameHtml(u);
   const st = $('#chatHeaderStatus');
   const typing = state.typing.has(u.id);
-  st.textContent = typing ? 'در حال نوشتن…' : lastSeenText(u);
+  if (typing) st.innerHTML = 'در حال نوشتن<span class="dots"><i></i><i></i><i></i></span>';
+  else st.textContent = lastSeenText(u);
   st.className = 'status' + (typing || u.online ? ' online' : '');
 }
 setInterval(() => state.activeId && renderHeader(), 60e3);
@@ -1433,6 +1482,314 @@ box.addEventListener('touchend', (e) => {
   }
 });
 
+// ───────────── دستگاه‌ها و امنیت ─────────────
+let devicesCache = [];
+const ICON_PHONE = '<svg viewBox="0 0 24 24" width="22" height="22"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10.5 18.5h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+const ICON_LAPTOP = '<svg viewBox="0 0 24 24" width="22" height="22"><rect x="4" y="5" width="16" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2 19h20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+
+function relTime(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 2 * 60e3) return 'همین الان';
+  if (diff < 3600e3) return `${fa(Math.floor(diff / 60e3))} دقیقه پیش`;
+  if (diff < 6 * 3600e3) return `${fa(Math.floor(diff / 3600e3))} ساعت پیش`;
+  return `${fmtDay(ts)} ساعت ${fmtTime(ts)}`;
+}
+
+function deviceRow(d) {
+  const icon = /Android|iPhone/.test(d.device) ? ICON_PHONE : ICON_LAPTOP;
+  const ip = d.ip ? ` · <span dir="ltr">${esc(d.ip.replace(/^::ffff:/, ''))}</span>` : '';
+  return `<div class="device">
+    <span class="device-icon">${icon}</span>
+    <div class="device-info">
+      <div class="device-name">${esc(d.device)}</div>
+      <div class="device-meta">${d.current ? '<span class="online-txt">آنلاین</span>' : 'آخرین فعالیت: ' + esc(relTime(d.lastActive))}${ip}</div>
+      <div class="device-meta">ورود: ${fmtDay(d.createdAt)} ساعت ${fmtTime(d.createdAt)}</div>
+    </div>
+    ${d.current ? '' : `<button type="button" class="device-out" data-sid="${d.id}">خروج</button>`}
+  </div>`;
+}
+
+function renderDevices() {
+  const cur = devicesCache.find((d) => d.current);
+  const others = devicesCache.filter((d) => !d.current);
+  $('#currentDevice').innerHTML = cur ? deviceRow(cur) : '';
+  $('#otherDevices').innerHTML = others.length
+    ? others.map(deviceRow).join('')
+    : '<p class="field-note" style="margin:0 4px 8px">در هیچ دستگاه دیگری وارد نشده‌اید.</p>';
+  $('#logoutOthers').classList.toggle('hidden', !others.length);
+}
+
+async function loadDevices() {
+  if (!state.token) return;
+  try {
+    devicesCache = await api('/api/sessions');
+  } catch {
+    return;
+  }
+  $('#devicesCount').textContent = devicesCache.length > 1 ? fa(devicesCache.length) : '';
+  if (!$('#devicesPanel').classList.contains('hidden')) renderDevices();
+}
+
+function openDevices() {
+  $('#menu').classList.add('hidden');
+  $('#devicesPanel').classList.remove('hidden');
+  $('#pwError').textContent = '';
+  renderDevices();
+  loadDevices();
+}
+
+$('#devicesBack').addEventListener('click', () => $('#devicesPanel').classList.add('hidden'));
+
+$('#otherDevices').addEventListener('click', async (e) => {
+  const b = e.target.closest('.device-out');
+  if (!b) return;
+  const d = devicesCache.find((x) => x.id === b.dataset.sid);
+  if (!confirm(`از «${d?.device || 'این دستگاه'}» خارج شود؟`)) return;
+  try {
+    await api('/api/sessions/' + b.dataset.sid, { method: 'DELETE' });
+    toast('دستگاه خارج شد');
+    loadDevices();
+  } catch (ex) {
+    toast(ex.message);
+  }
+});
+
+$('#logoutOthers').addEventListener('click', async () => {
+  if (!confirm('از همه‌ی دستگاه‌های دیگر خارج شوید؟')) return;
+  try {
+    await api('/api/sessions', { method: 'DELETE' });
+    toast('از همه‌ی دستگاه‌های دیگر خارج شدید');
+    loadDevices();
+  } catch (ex) {
+    toast(ex.message);
+  }
+});
+
+$('#pwForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('#pwError'), btn = $('#pwSave');
+  const current = $('#pw-current').value, password = $('#pw-new').value;
+  err.textContent = '';
+  const problem = pwProblem(password);
+  if (problem) return (err.textContent = problem);
+  btn.disabled = true;
+  try {
+    await api('/api/me/password', { method: 'PUT', body: { current, password } });
+    $('#pw-current').value = '';
+    $('#pw-new').value = '';
+    toast('رمز عبور تغییر کرد');
+    loadDevices();
+  } catch (ex) {
+    err.textContent = ex.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ───────────── پنل مدیریت ─────────────
+let adminTimer = null, adminTab = 'users', adminSearchTimer = null;
+let adminUsers = [];
+
+function statCard(n, label) {
+  return `<div class="stat"><div class="stat-n">${n}</div><div class="stat-l">${label}</div></div>`;
+}
+
+function renderAdminStats(st) {
+  $('#adminStats').innerHTML = [
+    statCard(fa(st.totalUsers), 'کل کاربران'),
+    statCard(fa(st.onlineNow), 'آنلاین الان'),
+    statCard(fa(st.activeToday), 'فعال امروز'),
+    statCard(fa(st.newToday), 'عضو جدید امروز'),
+    statCard(fa(st.messagesToday), 'پیام‌های امروز'),
+    statCard(fa(st.totalMessages), 'کل پیام‌ها'),
+    statCard(fa(st.files), 'فایل‌ها · ' + fmtSize(st.filesSize)),
+    statCard(fa(st.sessions), 'دستگاه‌های واردشده'),
+  ].join('');
+
+  $('#adminEvents').innerHTML = st.events.length ? st.events.map((ev) => {
+    const u = st.users[ev.user] || { displayName: 'کاربر حذف‌شده', username: '' };
+    const what = ev.type === 'signup'
+      ? 'حساب ساخت'
+      : `وارد شد با ${esc(ev.device)}${ev.ip ? ` <span dir="ltr">(${esc(ev.ip.replace(/^::ffff:/, ''))})</span>` : ''}`;
+    return `<div class="ev">
+      <span class="ev-icon ${ev.type}">${ev.type === 'signup' ? '＋' : '→'}</span>
+      <div class="ev-body"><div>${nameHtml(u)} <span class="ev-user" dir="ltr">@${esc(u.username)}</span></div>
+      <div class="ev-what">${what}</div></div>
+      <span class="ev-time">${esc(relTime(ev.at))}</span>
+    </div>`;
+  }).join('') : '<p class="field-note">هنوز رویدادی ثبت نشده.</p>';
+}
+
+function renderAdminUsers() {
+  $('#adminUsers').innerHTML = adminUsers.length ? adminUsers.map((u) => `
+    <div class="au-row${u.banned ? ' banned' : ''}" data-id="${u.id}">
+      <button type="button" class="au-open" data-act="open">${avatar(u, 'sm')}</button>
+      <div class="au-main">
+        <div class="au-name">${nameHtml(u)}
+          ${u.isAdmin ? '<span class="chip">مدیر</span>' : ''}
+          ${u.banned ? '<span class="chip red">مسدود</span>' : ''}
+        </div>
+        <div class="au-sub"><span dir="ltr">@${esc(u.username)}</span> · ${u.online ? '<span class="online-txt">آنلاین</span>' : esc(lastSeenText(u))}</div>
+        <div class="au-sub">عضویت: ${fmtDay(u.createdAt)} · پیام: ${fa(u.messages)} · دستگاه: ${fa(u.devices)}</div>
+      </div>
+      <div class="au-actions">
+        <button type="button" class="au-btn${u.verified ? ' on' : ''}" data-act="verify" title="تیک آبی">${VERIFIED_SVG} ${u.verified ? 'برداشتن تیک' : 'تیک آبی'}</button>
+        <button type="button" class="au-btn" data-act="logout">خروج از دستگاه‌ها</button>
+        <button type="button" class="au-btn" data-act="password">تغییر رمز</button>
+        ${u.isAdmin ? '' : `<button type="button" class="au-btn ${u.banned ? '' : 'red'}" data-act="ban">${u.banned ? 'رفع مسدودی' : 'مسدود کردن'}</button>`}
+      </div>
+    </div>`).join('') : '<p class="field-note">کاربری پیدا نشد.</p>';
+}
+
+async function loadAdmin() {
+  try {
+    const [st, users] = await Promise.all([
+      api('/api/admin/stats'),
+      api('/api/admin/users?q=' + encodeURIComponent($('#adminSearch').value.trim())),
+    ]);
+    adminUsers = users;
+    renderAdminStats(st);
+    renderAdminUsers();
+  } catch (ex) {
+    toast(ex.message);
+    closeAdmin();
+  }
+}
+
+function openAdmin() {
+  $('#menu').classList.add('hidden');
+  $('#adminPanel').classList.remove('hidden');
+  loadAdmin();
+  clearInterval(adminTimer);
+  adminTimer = setInterval(loadAdmin, 10000); // هر ۱۰ ثانیه تازه می‌شود
+}
+
+function closeAdmin() {
+  $('#adminPanel').classList.add('hidden');
+  clearInterval(adminTimer);
+}
+
+$('#adminClose').addEventListener('click', closeAdmin);
+$('#adminPanel').addEventListener('click', (e) => { if (e.target.id === 'adminPanel') closeAdmin(); });
+$('#adminSearch').addEventListener('input', () => {
+  clearTimeout(adminSearchTimer);
+  adminSearchTimer = setTimeout(loadAdmin, 300);
+});
+$('#adminTabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tab]');
+  if (!b) return;
+  adminTab = b.dataset.tab;
+  document.querySelectorAll('#adminTabs button').forEach((x) => x.classList.toggle('selected', x === b));
+  document.querySelectorAll('.admin-tab').forEach((t) => t.classList.toggle('hidden', t.dataset.tab !== adminTab));
+});
+
+$('#adminUsers').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const id = Number(b.closest('.au-row').dataset.id);
+  const u = adminUsers.find((x) => x.id === id);
+  if (!u) return;
+  const post = (path, body) => api(`/api/admin/users/${id}/${path}`, { method: 'POST', body });
+  try {
+    switch (b.dataset.act) {
+      case 'open':
+        state.users.set(u.id, { ...state.users.get(u.id), ...u });
+        return openUserModal(u.id);
+      case 'verify':
+        await post('verify', { verified: !u.verified });
+        toast(u.verified ? 'تیک آبی برداشته شد' : 'تیک آبی داده شد');
+        break;
+      case 'logout':
+        if (!confirm(`@${u.username} از همه‌ی دستگاه‌هایش خارج شود؟`)) return;
+        await post('logout');
+        toast('از همه‌ی دستگاه‌ها خارج شد');
+        break;
+      case 'password': {
+        const p = prompt(`رمز جدید برای @${u.username} (حداقل ۹ کاراکتر، حرف و عدد):`);
+        if (p === null) return;
+        const problem = pwProblem(p);
+        if (problem) return toast(problem);
+        await post('password', { password: p });
+        toast('رمز عوض شد و کاربر از همه‌ی دستگاه‌ها خارج شد');
+        break;
+      }
+      case 'ban':
+        if (!u.banned && !confirm(`@${u.username} مسدود شود؟ از همه‌ی دستگاه‌ها خارج می‌شود و دیگر نمی‌تواند وارد شود.`)) return;
+        await post('ban', { banned: !u.banned });
+        toast(u.banned ? 'رفع مسدودی شد' : 'کاربر مسدود شد');
+        break;
+    }
+    loadAdmin();
+  } catch (ex) {
+    toast(ex.message);
+  }
+});
+
+// ───────────── کشیدن پیام به چپ برای پاسخ (مثل تلگرام) ─────────────
+const SWIPE_TRIGGER = 56;
+let swipe = null;
+
+box.addEventListener('touchstart', (e) => {
+  if (e.touches.length !== 1) return;
+  const b = e.target.closest('.bubble');
+  if (!b) return;
+  const t = e.touches[0];
+  swipe = { x: t.clientX, y: t.clientY, bubble: b, id: msgIdOf(b), active: false, fired: false, icon: null };
+}, { passive: true });
+
+box.addEventListener('touchmove', (e) => {
+  if (!swipe) return;
+  const t = e.touches[0];
+  const dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
+  if (!swipe.active) {
+    if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; } // اسکرول عمودی
+    if (dx < -10 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      swipe.active = true;
+      clearTimeout(pressTimer);
+      pressTimer = null;
+      const icon = document.createElement('span');
+      icon.className = 'swipe-reply';
+      icon.innerHTML = ICON_REPLY;
+      swipe.bubble.appendChild(icon);
+      swipe.icon = icon;
+      swipe.bubble.classList.add('swiping');
+    } else return;
+  }
+  e.preventDefault();
+  const d = Math.min(0, dx);
+  // بعد از آستانه، حرکت سنگین‌تر می‌شود (حس کشسانی)
+  const shown = d > -SWIPE_TRIGGER ? d : -SWIPE_TRIGGER + (d + SWIPE_TRIGGER) * 0.3;
+  swipe.bubble.style.transform = `translateX(${Math.max(shown, -84)}px)`;
+  const p = Math.min(1, -d / SWIPE_TRIGGER);
+  swipe.icon.style.opacity = p;
+  swipe.icon.style.transform = `translateY(-50%) scale(${0.4 + p * 0.6})`;
+  const ready = -d >= SWIPE_TRIGGER;
+  if (ready !== swipe.fired) {
+    swipe.fired = ready;
+    swipe.icon.classList.toggle('ready', ready);
+    if (ready) navigator.vibrate?.(10);
+  }
+}, { passive: false });
+
+function endSwipe() {
+  if (!swipe) return;
+  const s = swipe;
+  swipe = null;
+  if (!s.active) return;
+  s.bubble.classList.remove('swiping');
+  s.bubble.style.transform = '';
+  if (s.icon) {
+    s.icon.style.opacity = 0;
+    setTimeout(() => s.icon.remove(), 250);
+  }
+  if (s.fired) {
+    const m = findMessage(s.id);
+    if (m) startReply(m);
+  }
+}
+box.addEventListener('touchend', endSwipe);
+box.addEventListener('touchcancel', endSwipe);
+
 // ───────────── رویدادهای سراسری ─────────────
 document.addEventListener('pointerdown', (e) => {
   if (!ctx.contains(e.target) && !e.target.closest('.react-btn')) closeCtxMenu();
@@ -1444,6 +1801,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('#lightbox').classList.contains('hidden')) return closeLightbox();
   if (!ctx.classList.contains('hidden')) return closeCtxMenu();
+  if (!$('#adminPanel').classList.contains('hidden')) return closeAdmin();
   if (openProfileId) return closeUserModal();
   if (state.replyTo) return clearReply();
   $('#menu').classList.add('hidden');
