@@ -1,63 +1,82 @@
 #!/bin/bash
-# نصب یا به‌روزرسانی خودکار Arian Chat روی Ubuntu
-# اجرا:            bash setup.sh
-# اجرا با دامنه:   DOMAIN=chat.example.com bash setup.sh
-# تعیین مدیر:      ADMIN=yourusername bash setup.sh
-# (دامنه و مدیر یک بار تنظیم می‌شوند و در اجراهای بعدی به خاطر سپرده می‌شوند)
+# نصب یا به‌روزرسانی خودکار Pingo Chat (Next.js) روی Ubuntu
+#
+#   bash setup.sh                                  نصب / به‌روزرسانی
+#   DOMAIN=pingochat.ir,www.pingochat.ir bash setup.sh   تنظیم دامنه(ها) با HTTPS
+#   ADMIN=arian bash setup.sh                      تعیین مدیر (چند نفر: ADMIN=arian,sara)
+#   REPO=https://github.com/USER/REPO.git bash setup.sh  تغییر مخزن GitHub
+#
+# دامنه، مدیر و مخزن یک بار تنظیم می‌شوند و در اجراهای بعدی به خاطر سپرده می‌شوند.
+# پیام‌ها، حساب‌ها و فایل‌ها در /opt/arian-data می‌مانند و با به‌روزرسانی پاک نمی‌شوند.
 set -e
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 APT="apt-get -y -o DPkg::Lock::Timeout=600"
-REPO="https://github.com/arianmarani/arianchat.git"
-APP=/opt/arian-chat
+APP=/opt/pingo-chat
 DATA=/opt/arian-data
+mkdir -p "$DATA"
+remember() { # remember NAME VALUE FILE
+  local v="$2"; [ -z "$v" ] && v="$(cat "$DATA/$3" 2>/dev/null || true)"
+  [ -n "$v" ] && echo "$v" > "$DATA/$3"; printf '%s' "$v"
+}
+REPO="$(remember REPO "$REPO" .repo)"
+REPO="${REPO:-https://github.com/arianmarani/pingochat.git}"
+echo "$REPO" > "$DATA/.repo"
+DOMAIN="$(remember DOMAIN "$DOMAIN" .domain)"
+ADMIN="$(remember ADMIN "$ADMIN" .admin)"
 
-echo "===== [1/6] Updating system ====="
+echo "===== [1/7] Updating system ====="
 $APT update
 $APT install curl git ca-certificates openssl
 
-echo "===== [2/6] Installing Node.js 22 ====="
-if ! node -v 2>/dev/null | grep -Eq '^v(2[2-9]|[3-9][0-9])'; then
+echo "===== [2/7] Memory (swap for next build) ====="
+if [ "$(swapon --show | wc -l)" -eq 0 ] && [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+echo "===== [3/7] Installing Node.js 22 ====="
+if ! node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=13)?0:1)' 2>/dev/null; then
   curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource.sh
   bash /tmp/nodesource.sh
   $APT install nodejs
 fi
 echo "Node: $(node -v)"
-
-echo "===== [3/6] Installing pm2 ====="
 npm install -g pm2
 
-echo "===== [4/6] Downloading Arian Chat ====="
+echo "===== [4/7] Downloading Pingo Chat ====="
 if [ -d "$APP/.git" ]; then
-  git -C "$APP" pull
+  git -C "$APP" remote set-url origin "$REPO"
+  git -C "$APP" fetch --depth 1 origin
+  git -C "$APP" reset --hard FETCH_HEAD
 else
   rm -rf "$APP"
-  git clone "$REPO" "$APP"
+  git clone --depth 1 "$REPO" "$APP"
 fi
 cd "$APP"
-npm install --omit=dev
 
-echo "===== [5/6] Starting server ====="
-mkdir -p "$DATA"
+echo "===== [5/7] Installing packages and building (a few minutes) ====="
+if [ -f package-lock.json ]; then npm ci; else npm install; fi
+NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS=--max-old-space-size=1536 npm run build
+
+echo "===== [6/7] Starting server ====="
 [ -f "$DATA/.jwt_secret" ] || openssl rand -hex 48 > "$DATA/.jwt_secret"
-export JWT_SECRET="$(cat "$DATA/.jwt_secret")" DB_PATH="$DATA/messenger.db"
-ADMIN="${ADMIN:-$(cat "$DATA/.admin" 2>/dev/null || true)}"
-[ -n "$ADMIN" ] && echo "$ADMIN" > "$DATA/.admin"
-export ADMIN_USERNAME="$ADMIN"
-pm2 delete arian-chat >/dev/null 2>&1 || true
-pm2 start server.js --name arian-chat --update-env
+export JWT_SECRET="$(cat "$DATA/.jwt_secret")" DB_PATH="$DATA/messenger.db" ADMIN_USERNAME="$ADMIN"
+export NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000
+pm2 delete arian-chat >/dev/null 2>&1 || true   # نسخه‌ی قبلی (Arian Chat)
+pm2 delete pingo-chat >/dev/null 2>&1 || true
+pm2 start server.js --name pingo-chat --update-env -- --prod
 pm2 save
 pm2 startup systemd -u root --hp /root >/dev/null
 
-echo "===== [6/6] Network / domain ====="
+echo "===== [7/7] Network / domain ====="
 command -v ufw >/dev/null && ufw allow 3000 >/dev/null || true
-
-# دامنه یک بار تنظیم می‌شود و در اجراهای بعدی به خاطر سپرده می‌شود
-DOMAIN="${DOMAIN:-$(cat "$DATA/.domain" 2>/dev/null || true)}"
 if [ -n "$DOMAIN" ]; then
-  echo "$DOMAIN" > "$DATA/.domain"
   $APT install caddy
+  SITES="$(echo "$DOMAIN" | sed 's/ //g; s/,/, /g')"
   cat > /etc/caddy/Caddyfile <<CADDY
-$DOMAIN {
+$SITES {
+	encode zstd gzip
 	reverse_proxy localhost:3000
 }
 CADDY
@@ -69,7 +88,7 @@ fi
 IP="$(curl -s4 --max-time 5 ifconfig.me || hostname -I | awk '{print $1}')"
 echo
 echo "=============================================="
-echo " Arian Chat is running:  http://$IP:3000"
-[ -n "$DOMAIN" ] && echo " With domain (HTTPS):    https://$DOMAIN"
+echo " Pingo Chat is running:  http://$IP:3000"
+[ -n "$DOMAIN" ] && echo " Domain(s) with HTTPS:   $DOMAIN"
 [ -n "$ADMIN" ] && echo " Admin:                  @$ADMIN"
 echo "=============================================="

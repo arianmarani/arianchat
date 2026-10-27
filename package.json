@@ -1,19 +1,25 @@
 {
-  "name": "arian-chat",
-  "version": "1.0.0",
-  "description": "Arian Chat — پیام‌رسان تحت وب",
-  "main": "server.js",
+  "name": "pingo-chat",
+  "version": "3.2.0",
+  "private": true,
+  "description": "Pingo Chat — پیام‌رسان تحت وب با Next.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
-  },
-  "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "express": "^4.21.1",
-    "jsonwebtoken": "^9.0.2",
-    "socket.io": "^4.8.1"
+    "dev": "node server.js",
+    "build": "next build",
+    "start": "node server.js --prod"
   },
   "engines": {
     "node": ">=22.13"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "next": "^16.4.1",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
   }
 }
